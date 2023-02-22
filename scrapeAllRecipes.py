@@ -7,6 +7,7 @@ import urllib.parse
 import json
 from difflib import SequenceMatcher
 import psycopg2
+from psycopg2.extras import execute_values
 from config import config
 
 def cleanName(name, nlp):
@@ -42,12 +43,12 @@ def cleanName(name, nlp):
 def connect():    
     dbParams = config()
     conn = psycopg2.connect(**dbParams)
-    cursor = conn.cursor()
-    return cursor
+    return conn
 
 def getIngredientDB(name):
-    cursor = connect()
-    cursor.execute("SELECT id, ingredient_name, api_id, api_name FROM ingredient WHERE ingredient_name LIKE '" + name + "'")
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * from public.getingredientbyname('" + name + "')")
 
     records = cursor.fetchall()
     returnList = []
@@ -58,23 +59,43 @@ def getIngredientDB(name):
             "ID":record[0],
             "Name":record[1],
             "APIID":record[2],
-            "APIName":record[3]
+            "APIName":record[3],
+            "possibleUnits":record[4]
         }
         returnList.append(returnDict)
-
+    
     return returnList
 
-def getIngredientDetailAPI(name):
+def getIngredientAPI(name):
     urlEncodedName = urllib.parse.quote(name)
     ingredientAPIURL = spoonacularBaseURL + "/food/ingredients/search?apiKey=" + spoonacularAPIKey + "&query=" + urlEncodedName
     ingredientResponse = requests.get(ingredientAPIURL)
     ingredientResponseObj = json.loads(ingredientResponse.text)
     return ingredientResponseObj
 
+def getIngredientDetailAPI(id):
+    ingredientAPIURL = spoonacularBaseURL + "/food/ingredients/" + str(id) + "/information?apiKey=" + spoonacularAPIKey
+    ingredientResponse = requests.get(ingredientAPIURL)
+    ingredientResponseObj = json.loads(ingredientResponse.text)
+    return ingredientResponseObj
+
+def insertIntoLoadData(dictList):
+    conn = connect()
+    cursor = conn.cursor()
+    columns = dictList[0].keys()
+    query = "INSERT INTO load_data ({}) VALUES %s".format(','.join(columns))
+
+    values = [[value for value in dict.values()] for dict in dictList]
+    print("Query: " + query)
+    print("Values: " + json.dumps(values))
+    execute_values(cursor, query, values)
+    conn.commit()
+
+
 nlp = spacy.load("en_core_web_sm")
-url = "https://www.allrecipes.com/recipe/92462/slow-cooker-texas-pulled-pork/"
+# url = "https://www.allrecipes.com/recipe/92462/slow-cooker-texas-pulled-pork/"
 # url = "https://www.allrecipes.com/recipe/14656/meatloaf-with-fried-onions-and-ranch-seasoning/"
-# url = "https://www.allrecipes.com/recipe/230679/jessicas-red-beans-and-rice/"
+url = "https://www.allrecipes.com/recipe/230679/jessicas-red-beans-and-rice/"
 # url = "https://www.allrecipes.com/recipe/70343/slow-cooker-chicken-taco-soup/"
 
 spoonacularConfig = config(section="spoonacular")
@@ -99,6 +120,7 @@ for ingredient in ingredientList:
     # Get all parts of the ingredient item (quantity, unit and name)
     ingredientParts = ingredient.find_all("span")
     dictionary = {}
+    dictionary['recipeurl'] = url
 
     # For each ingredient part...
     for part in ingredientParts:
@@ -125,7 +147,8 @@ for ingredient in ingredientList:
             if len(dbResult) > 0:
                 returnResult = {
                     "id": dbResult[0]["APIID"],
-                    "name": dbResult[0]["APIName"]
+                    "name": dbResult[0]["APIName"],
+                    "possibleUnits":dbResult[0]["possibleUnits"]
                     }
             else:
                 cleanedName = cleanName(name, nlp)
@@ -134,10 +157,11 @@ for ingredient in ingredientList:
                 if len(dbResult) > 0:
                     returnResult = {
                         "id": dbResult[0]["APIID"],
-                        "name": dbResult[0]["APIName"]
+                        "name": dbResult[0]["APIName"],
+                        "possibleUnits":dbResult[0]["possibleUnits"]
                         }
                 else:
-                    ingredientResponseObj = getIngredientDetailAPI(name)
+                    ingredientResponseObj = getIngredientAPI(name)
 
                     if len(ingredientResponseObj["results"]) > 1:
                         previousHighestRatio = 0
@@ -153,7 +177,7 @@ for ingredient in ingredientList:
                         returnResult = ingredientResponseObj["results"][0]
                     else:
                         cleanedName = cleanName(name, nlp)
-                        ingredientResponseObj = getIngredientDetailAPI(cleanedName)
+                        ingredientResponseObj = getIngredientAPI(cleanedName)
 
                         if len(ingredientResponseObj["results"]) > 1:
                             previousHighestRatio = 0
@@ -173,10 +197,11 @@ for ingredient in ingredientList:
                                 if len(dbResult) > 0:
                                     returnResult = {
                                         "id": dbResult[0]["APIID"],
-                                        "name": dbResult[0]["APIName"]
+                                        "name": dbResult[0]["APIName"],
+                                        "possibleUnits":dbResult[0]["possibleUnits"]
                                         }
                                 else:
-                                    ingredientResponseObj = getIngredientDetailAPI("seasoning mix")
+                                    ingredientResponseObj = getIngredientAPI("seasoning mix")
 
                                     if len(ingredientResponseObj["results"]) > 1:
                                         returnResult = [result for result in ingredientResponseObj["results"] if result['name'] == "seasoning mix"][0]
@@ -187,12 +212,16 @@ for ingredient in ingredientList:
                                     
                             else:
                                 print("Error - no matching ingredient")
-                dictionary["apiID"] = returnResult["id"]
-                dictionary["apiName"] = returnResult["name"]
+            dictionary["apiid"] = returnResult["id"]
+            dictionary["apiname"] = returnResult["name"]
+            ingredientDetails = getIngredientDetailAPI(returnResult["id"])
+            dictionary["possibleunits"] = json.dumps(ingredientDetails['possibleUnits']) #'~'.join(ingredientDetails['possibleUnits'])
 
     csvList.append(dictionary)
 
-with open("C:/temp/scrapeAllRecipesResults.csv", "w", newline="\n", encoding="utf-8-sig") as f:
-    w = csv.DictWriter(f, dictionary.keys(), dialect="excel-tab")
-    w.writeheader()
-    w.writerows(csvList)
+insertIntoLoadData(csvList)
+
+# with open("C:/temp/scrapeAllRecipesResults.csv", "w", newline="\n", encoding="utf-8-sig") as f:
+#     w = csv.DictWriter(f, dictionary.keys(), dialect="excel-tab")
+#     w.writeheader()
+#     w.writerows(csvList)
